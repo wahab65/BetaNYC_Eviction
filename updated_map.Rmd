@@ -1,0 +1,194 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+
+```{r}
+
+---
+title: "SHiny_2"
+output: html_document
+---
+
+```{r}
+library(DT)
+library(shiny)
+library(tidyverse)
+library(sf)
+library(sp)
+library(leaflet)
+
+#Reads in eviction dataset and creates a date column of type dates. 
+data= read.csv("./nycdb/weekly_202203070957.csv")
+data$my_dates = as.Date(data$`day`, '%Y-%m-%d')
+
+
+#Reads in anotger dataset that has zipcodes and latitude, longitude information
+zipcode_polygons = st_read("./ZIP_CODE_040114/ZIP_CODE_040114.shp")  %>%
+  select(ZIPCODE, geometry, POPULATION)
+#Reads in another dataset that has only zipcodes, count by zipcodes of the eviction table.
+cases = read.csv("./UPDATES_CASES.csv")%>%
+  mutate(date = as.Date(filedate), zipcode = substr(zipcode, 0, 5))
+#Get healthdata set from github
+health_data <- read.csv(url("https://raw.githubusercontent.com/nychealth/coronavirus-data/master/latest/last7days-by-modzcta.csv"))
+
+neigborhouds = health_data %>%
+              select(modzcta, modzcta_name)
+colnames(neigborhouds)[1] <- "ZipCode"
+#neigborhouds$Location = paste(neigborhouds$ZipCode,neigborhouds$modzcta_name, sep = "<br/>")
+
+
+getEvinctionTable = function(start_date, end_date){
+  filtered_cases = cases %>%
+    filter(date >= start_date & date <= end_date)  %>%
+    group_by(zipcode)  %>%
+    summarize(count = sum(totaleviction)) 
+  
+  tables_output = neigborhouds %>%
+    merge(filtered_cases, by.x = "ZipCode", by.y = "zipcode") %>%
+    arrange(desc(count))
+}
+
+#create a function that maps the evictions
+getEvinctionMap = function(start_date, end_date){
+  #creates a dataframe between the given date range and also groups them by zipcode and and sums up the evictions
+  filter_cases = cases %>%
+    filter(date >= start_date & date <= end_date)  %>%
+    group_by(zipcode)  %>%
+    summarize(count = sum(totaleviction))
+  #joins both the zipcode dataset and the eviction dataset
+  zipcode_cases = zipcode_polygons  %>%
+    merge(filter_cases, by.x = "ZIPCODE", by.y = "zipcode")
+  #creates a map 
+  return (ggplot() +
+          geom_sf(data = zipcode_cases,
+          aes(fill = count), size = 0.2) +
+          scale_fill_continuous(low="yellow",high="red",
+                                name = paste("Evinctions by Zipcode between", startDate, " and ", endDate)) +
+                                coord_sf(crs = "EPSG:2263",
+                                default_crs = "EPSG:4326") +
+                                theme_void())
+}
+
+  
+  
+
+  getEvinctionLeafletMap = function(start_date, end_date){
+    
+    filter_cases = cases %>%
+    filter(date >= start_date & date <= end_date)  %>%
+    group_by(zipcode)  %>%
+    summarize(count = sum(totaleviction))
+    
+    zipcode_cases = zipcode_polygons  %>%
+    merge(filter_cases, by.x = "ZIPCODE", by.y = "zipcode")
+  labels <- sprintf("<strong>%s</strong><br/>%s cases",
+                  zipcode_cases$ZIPCODE, zipcode_cases$count) %>%
+                  lapply(htmltools::HTML)
+  pal <- colorBin(palette = "OrRd", 9, domain = zipcode_cases$count)
+  
+  
+    return (zipcode_cases %>%
+    st_transform(crs = "+init=epsg:4326")%>%
+    leaflet(options = leafletOptions(minZoom = 11, maxZoom = 16))%>%
+    setMaxBounds(-73.97, 40.77,-73.97, 40.77) %>%
+    addProviderTiles(provider = "CartoDB.Positron") %>%
+    addPolygons(label = labels,
+                stroke = FALSE,
+                smoothFactor = .5,
+                opacity = 1,
+                fillOpacity = 0.7,
+                fillColor = ~ pal(zipcode_cases$count),
+                highlightOptions = highlightOptions(weight = 5,
+                                                    fillOpacity = 1,
+                                                    color = "black",
+                                                    opacity = 5,
+                                                    bringToFront = TRUE)))
+  }
+ 
+
+getEvinction = function(start_date, end_date, borough){
+  data %>% 
+  select(my_dates, active_cases, cases_filed, city) %>% 
+  filter(my_dates > start_date & my_dates <end_date & city == borough) %>% 
+  ggplot(aes(x= my_dates, group =1)) +   
+  geom_line(aes(y = active_cases), color = "red") + 
+  geom_line(aes(y = cases_filed), color="steelblue")  + 
+  scale_x_date(date_breaks = '4 month', guide = guide_axis(n.dodge = 2), date_labels = "%m-%y") 
+}
+# Define UI for app that draws a histogram ----
+ui <- fluidPage(
+  
+  # App title ----
+  titlePanel("Eviction in New York City!"),
+  
+  # Sidebar layout with input and output definitions ----
+  sidebarLayout(
+    
+    # Sidebar panel for inputs ----
+    sidebarPanel(
+      
+      # Input: Slider for the number of bins ----
+      selectInput(inputId = "city", 
+               label = "Choose a County", 
+                choices = c("New York", "Brooklyn"), 
+                plotOutput("distPlot")),
+      
+      sliderInput(inputId = "input_date", 
+                label = "Scroll to select your dates",
+                timeFormat="%Y-%m",
+                min = as.Date(min(data$my_dates)),
+                max = as.Date(max(data$my_dates)),
+                value = c(as.Date("2018-02-01"),as.Date("2020-01-01"))
+                )
+      
+      
+    ),
+    
+    # Main panel for displaying outputs ----
+    mainPanel(
+      
+      # Output: Histogram ----
+      plotOutput(outputId = "distPlot"),
+      leafletOutput(outputId = "mapPlot"),
+      DT::dataTableOutput("table")
+    )
+  )
+)
+
+
+
+
+# Define server logic required to draw a histogram ----
+server <- function(input, output) {
+  
+  
+
+  output$distPlot <- renderPlot({
+    getEvinction(input$input_date[1], input$input_date[2], input$city)
+  })
+  #output$mapPlot <- renderPlot({
+  #  getEvinctionMap(input$input_date[1], input$input_date[2]) 
+  #})
+  output$mapPlot <- leaflet::renderLeaflet({
+    getEvinctionLeafletMap(input$input_date[1], input$input_date[2]) 
+  })
+  output$table <- DT::renderDataTable(datatable({
+    datas = getEvinctionTable(input$input_date[1], input$input_date[2])
+    
+  }))
+  
+}
+
+
+# Create Shiny app ----
+shinyApp(ui = ui, server = server)
+
+```
+
+
+
+
+
+```
